@@ -4,7 +4,7 @@ This repository ilustrates the practical implications of the quantum security an
 
 ## Description of the C-code implementation
 
-Summarizing, the presented C-code implementation corresponds with translation of the python-code implementation of [**On new Vélu's formulae and their applications to CSIDH and B-SIDH constant-time implementations**](https://eprint.iacr.org/2020/1109), but this time focusing on constant-time implementations of CSIDH for arbitrary primes. The primes used corresponds with the family of primes `p` such that `(p+1)/4` splits into `n` different small odd primes. Additionally, we also provide a code that estimates the costs to find a hidden shift of an imaginary quadratic order, i.e., to break CSIDH and related schemes, under a range of depth limits (for more details, to chec its corresponding [README.md](quantum-cost-estimation/README.md) file).
+Summarizing, the presented C-code implementation corresponds with translation of the python-code implementation of [**On new Vélu's formulae and their applications to CSIDH and B-SIDH constant-time implementations**](https://eprint.iacr.org/2020/1109), but this time focusing on constant-time implementations of CSIDH for arbitrary primes. The primes used corresponds with the family of primes `p` such that `(p+1)/4` splits into `n` different small odd primes. Additionally, we also provide a code that estimates the costs to find a hidden shift of an imaginary quadratic order, i.e., to break CSIDH and related schemes, under a range of depth limits (for more details, to check its corresponding [README.md](quantum-cost-estimation/README.md) file).
 
 The novelty of this C-code implementation relies on the large constant-time CSIDH instantiations (named them: CSIDH-1024, CSIDH-1792, CSIDH-2048, CSIDH-3072, CSIDH-4096, CSIDH-5120, CSIDH-6144, CSIDH-8192, CSIDH-9216).
 
@@ -89,5 +89,5 @@ This project is licensed under the GNU general public license - see the [LICENSE
 ## Funding
 
 This project has received funding from the European Research Council (ERC) under the European Union's Horizon 2020 research and innovation programme (grant agreement No 804476). 
-
-The third author received partial funds from the Mexican Science council CONACyT project 313572.
+Samuel Jaques was supported by the University of Oxford Clarendon fund.
+The fourth author received partial funds from the Mexican Science council CONACyT project 313572.
