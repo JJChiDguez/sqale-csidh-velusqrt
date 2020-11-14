@@ -1,0 +1,110 @@
+#!/bin/bash
+
+mkdir -p results
+
+bits=$1
+framework=`ls tmp/csidh-$bits-*`
+
+inputWD2=""
+inputWD1=""
+inputDF=""
+
+outputWD2=""
+outputWD1=""
+outputDF=""
+
+for style in $framework
+do
+	# OAYT-style (wd2 configuration)
+	if [[ "$style" == *"wd2"* ]]
+	then
+		inputWD2="$inputWD2 $style"
+		STYLE=${style/tmp/results}
+		STYLE=${STYLE/.h/.results}
+		outputWD2="$outputWD2 $STYLE"
+	fi
+	# MCR-style (wd1 configuration)
+	if [[ "$style" == *"wd1"* ]]
+	then
+		inputWD1="$inputWD1 $style"
+		STYLE=${style/tmp/results}
+		STYLE=${STYLE/.h/.results}
+		outputWD1="$outputWD1 $STYLE"
+	fi
+	# Dummy-free-style (dummy-free configuration)
+	if [[ "$style" == *"df"* ]]
+	then
+		inputDF="$inputDF $style"
+		STYLE=${style/tmp/results}
+		STYLE=${STYLE/.h/.results}
+		outputDF="$outputDF $STYLE"
+	fi
+done
+
+
+echo "======================"
+echo "Processing CSIDH-$bits"
+echo "--------------------------------"
+echo "Configurations to be considered (inputs):"
+echo "OAYT-style:       $inputWD2"
+echo "MCR-style:        $inputWD1"
+echo "Dummy-free-style: $inputDF"
+echo "Configurations to be considered (outputs):"
+echo "OAYT-style:       $outputWD2"
+echo "MCR-style:        $outputWD1"
+echo "DUmmy-free-style: $outputDF"
+
+# ----------------------
+# Converting into arrays
+inputWD2=($inputWD2)
+outputWD2=($outputWD2)
+
+inputWD1=($inputWD1)
+outputWD1=($outputWD1)
+
+inputDF=($inputDF)
+outputDF=($outputDF)
+
+# Number of different configurations per style
+countWD2=${#inputWD2[@]}
+countWD1=${#inputWD1[@]}
+countDF=${#inputDF[@]}
+
+echo ""
+for i in `seq 1 $countWD2`
+do
+	echo ""
+	echo "================================="
+	echo ${inputWD2[$i-1]}
+	echo ${outputWD2[$i-1]}
+	echo "---------------------------------"
+	cp ${inputWD2[$i-1]} include/strategy/csidh-$bits-wd2.h
+	make bench BITS=$bits STYLE=wd2 CC=clang -B
+	./csidh-$bits-wd2.bench &> ${outputWD2[$i-1]}
+done
+
+echo ""
+for i in `seq 1 $countWD1`
+do
+	echo ""
+	echo "================================="
+	echo ${inputWD1[$i-1]}
+	echo ${outputWD1[$i-1]}
+	echo "---------------------------------"
+	cp ${inputWD1[$i-1]} include/strategy/csidh-$bits-wd1.h
+	make bench BITS=$bits STYLE=wd1 CC=clang -B
+	./csidh-$bits-wd1.bench &> ${outputWD1[$i-1]}
+done
+
+echo ""
+for i in `seq 1 $countDF`
+do
+	echo ""
+	echo "================================="
+	echo ${inputDF[$i-1]}
+	echo ${outputDF[$i-1]}
+	echo "---------------------------------"
+	cp ${inputDF[$i-1]} include/strategy/csidh-$bits-df.h
+	make bench BITS=$bits STYLE=df CC=clang -B
+	./csidh-$bits-df.bench &> ${outputDF[$i-1]}
+done

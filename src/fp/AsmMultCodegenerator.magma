@@ -1,0 +1,609 @@
+clear;
+
+
+// Utility functions
+
+///////////////////////////////////////////////////
+//p word extractor [repeat pword times]
+WordExtractor := function(Name, p, pwords, Var)
+
+k := 64;
+PWord := [];
+S        := Sprintf(".global %o\n%o:\n", Var, Var);
+
+pp := p;
+
+for i := 1 to pwords do
+	if ((i - 1) mod 4 eq 0) then
+		S  cat:= ".quad ";
+	end if ;
+	PWord[i] := pp mod 2^k;
+	if (i  mod 4 ne 0) then
+		S cat:= Sprintf( "%h,", PWord[i]);
+	else  
+		S cat:=  Sprintf( "%h \n", PWord[i]);
+	end if;
+	pp := pp div 2^k;
+end for;
+S cat:=  "\n\n";
+PrintFile(Name, S);
+
+return S;
+end function;
+
+//////////////////////////////////////////////////////////////////
+PrintHeader := function(Name, pbits, pbytes, plimbs)
+
+S         := ".intel_syntax noprefix\n\n";
+S  cat:= ".section .rodata\n\n";
+S  cat:= Sprintf(".set pbits,%o\n",pbits);
+S  cat:= Sprintf(".set pbytes,%o\n",pbytes);
+S  cat:= Sprintf(".set plimbs,%o\n\n",plimbs);
+PrintFile(Name, S:Overwrite:=true);
+
+return S;
+end function;
+
+//////////////////////////////////////////////////////////////////
+PrintUintHeader := function(Name, plimbs)
+
+S         := ".intel_syntax noprefix\n\n";
+S  cat:= ".section .rodata\n\n";
+S  cat:= ".global uintbig_1\nuintbig_1:\n";
+S  cat:= "    .quad 1, 0, 0, 0\n";
+
+N  := plimbs div 4 -1;
+for i:=1 to  N do
+S  cat:= "    .quad 0, 0, 0, 0\n"; 
+end for;
+
+N := plimbs mod 4; 
+if (N ne 0) then 
+	S  cat:= "    .quad";
+	for i:= 1 to N-1 do
+			S  cat:= " 0,";
+	end for;  
+	S  cat:= "0\n";
+end if;
+
+S  cat:= ".section .text\n\n";
+
+S  cat:= ".global uintbig_add\nuintbig_add:\n    mov rax, [rsi +  0]\n    add rax, [rdx +  0]\n    mov [rdi +  0], rax\n    .set k, 1\n";
+S  cat:= Sprintf("    .rept %o\n        ", plimbs-1);
+
+S  cat:= "mov rax, [rsi + 8*k]\n        adc rax, [rdx + 8*k]\n        mov [rdi + 8*k], rax\n        .set k, k+1\n    .endr\n    setc al\n    movzx rax, al\n    ret\n\n";
+
+S  cat:= ".global uintbig_sub\nuintbig_sub:\n    mov rax, [rsi +  0]\n    sub rax, [rdx +  0]\n    mov [rdi +  0], rax\n    .set k, 1\n";
+S  cat:= Sprintf("    .rept %o\n", plimbs-1);
+S  cat:= "      mov rax, [rsi + 8*k]\n        sbb rax, [rdx + 8*k]\n        mov [rdi + 8*k], rax\n        .set k, k+1\n    .endr\n    setc al\n    movzx rax, al\n    ret";
+
+PrintFile(Name, S:Overwrite:=true);
+
+return 0;
+end function;
+
+
+
+
+
+////////////////////////////////////////
+PrintFooter := function(Name)
+
+S        := ".section .data\n\n";
+S cat:= ".global fpadd\nfpadd:\n     .quad 0\n\n";
+S cat:= ".global fpsqr\nfpsqr:\n     .quad 0\n\n";
+S cat:= ".global fpmul\nfpmul:\n     .quad 0\n\n";
+S cat:= ".section .text\n\n.p2align 4,,15\n\n";
+S cat:= ".global init_counters\ninit_counters:\n      movq fpadd, 0\n      movq fpsqr, 0\n      movq fpmul, 0\n      ret\n\n";
+S cat:= ".global fp_copy\nfp_copy:\n    cld\n    mov rcx, plimbs\n    rep movsq\n    ret\n\n";
+S cat:= ".global fp_cswap\nfp_cswap:\n    movzx rax, dl\n    neg rax\n    .set k, 0\n    .rept plimbs\n        mov rcx, [rdi + 8*k]\n";
+S cat:= "mov rdx, [rsi + 8*k]\n        mov r8, rcx\n        xor r8, rdx\n        and r8, rax\n\n        xor rcx, r8\n        xor rdx, r8\n\n";
+S cat:= "        mov [rdi + 8*k], rcx\n        mov [rsi + 8*k], rdx\n\n        .set k, k+1\n    .endr\n    ret\n\n";
+
+PrintFile(Name, S);
+return S;
+end function;
+
+////////////////////////////////////////
+PrintRedOnce := function(Name, pbytes)
+
+Reg_Ar := ["rdi", "rsi", "rdx", "rcx", "r8", "r9", "r10", "r11"];
+
+S               := ".reduce_once:\n    push rbp\n    mov rbp, rdi\n\n    mov rdi, [rbp +  0]\n    sub rdi, [rip + p +  0]\n";
+
+N := pbytes-8;
+
+for i:= 8 to N by 8 do
+	S        cat:= Sprintf("    mov %o, [rbp +  %o]\n    sbb %o, [rip + p +  %o]\n", Reg_Ar[(i div 8) mod 8 +1], i, Reg_Ar[(i div 8) mod 8 +1], i);
+	if ((((i+8) div 8) mod 8 eq 0) and (i ne 0) ) then
+		S cat:= "\n";
+	end if;
+end for;
+
+S               cat:= "\n    setnc al\n    movzx rax, al\n    neg rax\n\n";
+S               cat:= ".macro cswap2, r, m\n    xor \\r, \\m\n    and \\r, rax\n    xor \\m, \\r\n.endm\n\n\n";
+
+n := -((pbytes div 8) mod 8) +8;
+
+for i:= 1 to n do
+	S        cat:= Sprintf("    cswap2 %o, [rbp +  %o]\n", Reg_Ar[i], (pbytes-n*8)+(i-1)*8);
+end for;
+
+	N       -:= n*8;
+	M        := Ceiling(N/64);
+	for j := 1 to M do
+		S  cat:= "\n    mov rdi, [rbp +  0]\n    sub   rdi, [rip + p +  0]\n";
+		for i:= 8 to N by 8 do
+			S        cat:= Sprintf("    mov %o, [rbp +  %o]\n    sbb %o, [rip + p +  %o]\n", Reg_Ar[(i div 8) mod 8 +1], i, Reg_Ar[(i div 8) mod 8 +1], i);
+			if ((((i+8) div 8) mod 8 eq 0) and (i ne 0) ) then
+				S cat:= "\n";
+			end if;
+		end for;
+		for i:= 1 to 8 do
+			S        cat:= Sprintf("    cswap2 %o, [rbp +  %o]\n", Reg_Ar[i], (N-64)+i*8);
+		end for;
+		//S  cat:= "\n";
+		N -:= 64;
+	end for;
+	S cat:= "    pop rbp\n    ret\n\n";
+
+PrintFile(Name, S);
+return S;
+end function;
+
+////////////////////////////////////////
+PrintSub := function(Name)
+
+S        := ".global fp_add2\nfp_add2:\n  mov rdx, rdi\n\n";
+S cat:= ".global fp_add\nfp_add:\n  push rdi\n  call uintbig_add\n  pop rdi\n\n  incq fpadd\n\n  jmp .reduce_once\n\n";
+S cat:= ".global fp_sub2\nfp_sub2:\n  mov rdx, rdi\n  xchg rsi, rdx\n\n.global fp_sub\nfp_sub:\n  push rdi\n  call uintbig_sub\n  pop rdi\n\n\n";
+S cat:= "  incq fpadd  /* increasing number of additions performed */\n\n  neg rax\n\n  sub rsp, pbytes\n\n";
+S cat:= "  mov rcx, [rip + p +  0]\n  and rcx, rax\n  mov [rsp + 0],rcx\n  .set k, 1\n  .rept plimbs-1\n      mov rcx, [rip + p + 8*k]\n      and rcx, rax\n";
+S cat:= "      mov [rsp + 8*k], rcx\n      .set k, k+1\n  .endr\n\n";
+S cat:= "  mov rcx, [rsp +  0]\n  add rcx, [rdi +  0]\n  mov [rdi +  0], rcx\n  .set k, 1\n  .rept plimbs-1\n      mov rcx, [rsp + 8*k]\n";
+S cat:= "      adc rcx, [rdi + 8*k]\n      mov [rdi + 8*k], rcx\n      .set k, k+1\n  .endr\n\n  add rsp, pbytes\n  ret\n\n\n";
+S cat:= "/* Montgomery arithmetic */\n\n.global fp_enc\nfp_enc:\n    lea rdx, [rip + r_squared_mod_p]\n    jmp fp_mul\n\n";
+S cat:= ".global fp_dec\nfp_dec:\n    lea rdx, [rip + uintbig_1]\n    jmp fp_mul\n\n\n";
+
+PrintFile(Name, S);
+return S;
+end function;
+
+////////////////////////////////////////
+PrintMul := function(Name, pbytes, pwords)
+Reg_Ar := ["rbx", "rcx"];
+
+S               := ".global fp_mul2\nfp_mul2:\n  mov rdx, rdi\n.global fp_mul\nfp_mul:\n  push rbp\n  push rbx\n\n";
+S        cat:= "  incq fpmul  /* increasing number of multiplications performed */\n\n";
+
+S        cat:= Sprintf("  sub rsp, %o\n  mov [rsp+ %o],rdi\n  mov rdi,rsi\n  mov rsi,rdx\n\n\n", pbytes + 16, pbytes+8);
+S        cat:= "  xor rax,rax\n";
+
+N := pbytes;
+
+for i:= 0 to N by 8 do
+	S        cat:=Sprintf( "  mov [rsp+%o],rax\n", i);
+end for; 
+
+
+S        cat:="\n\n.macro MULSTEP, k, ";
+R := "";
+for i := 0 to  pwords-1 do
+	R := "";
+	R        cat:=Sprintf("I%o,", i);
+	S        cat:=R;
+end for;
+
+S        cat:=Sprintf("I%o\n\n", pwords);
+S        cat:="    mov r11,[rsp+\\I0]\n    mov rdx, [rsi +  0]\n    mulx rcx, rdx, [rdi + 8*\\k]\n    add rdx, r11\n    mulx rcx, rdx, [rip + inv_min_p_mod_r]";
+S        cat:="\n\n    xor rax, rax /* clear flags */\n\n\n";
+
+S        cat:= "    mulx rbx, rax, [rip + p +  0]\n    adox r11, rax\n    mov [rsp+\\I0], r11\n\n";
+N := pbytes-8;
+for i := 8 to  N by 8 do
+	S        cat:= Sprintf("    mov r11,[rsp+\\I%o]\n    mulx %o, rax, [rip + p +  %o]\n ", i div 8, Reg_Ar[(i div 8) mod 2+1], i);
+	S        cat:= Sprintf("   adcx r11, %o\n   adox r11, rax\n    mov [rsp+\\I%o],r11\n\n", Reg_Ar[-((i div 8) mod 2) +2], i div 8);
+end for;
+
+S        cat:= Sprintf("\n    mov r11,[rsp+\\I%o]\n    mov rax, 0\n    adcx r11, rcx\n    adox r11, rax\n    mov [rsp+\\I%o],r11\n\n", pwords, pwords); 
+S        cat:= "    mov rdx, [rdi + 8*\\k]\n\n    xor rax, rax /* clear flags */\n\n";
+
+S        cat:= "    mov r11,[rsp+\\I0]\n    mulx rbx, rax, [rsi +  0]\n    adox r11, rax\n    mov [rsp+\\I0],r11\n\n";
+
+for i := 8 to  N by 8 do
+	S        cat:= Sprintf("    mov r11,[rsp+\\I%o]\n    mulx %o, rax, [rsi +  %o]\n", i div 8,  Reg_Ar[(i div 8) mod 2+1], i);
+	S        cat:= Sprintf("    adcx r11, %o\n    adox r11, rax\n    mov [rsp+\\I%o],r11\n\n",  Reg_Ar[-((i div 8) mod 2) +2] , i div 8);
+end for;
+
+S        cat:= Sprintf("    mov r11,[rsp+\\I%o]\n    mov rax, 0\n    adcx r11, rcx\n    adox r11, rax\n    mov [rsp+\\I%o],r11\n\n.endm\n\n", pwords, pwords);
+
+T := "";
+for i := 0 to  pwords-1 do
+	T        cat:= Sprintf("MULSTEP %o,", i);
+	for j := 8 to pbytes  by 8 do
+		T        cat:= Sprintf("%o,", (j + i*8) mod (pbytes + 8));
+	end for;
+	S        cat:= T;	
+	T := "";
+	S        cat:= Sprintf("%o\n", (pbytes +8 + i*8) mod (pbytes + 8));
+end for;
+S        cat:= Sprintf("\n\n    mov rdi,[rsp+%o]\n\n", pbytes +8);
+
+for i := 0 to  N by 8 do
+	S        cat:= Sprintf("    mov r11,[rsp+%o]\n    mov [rdi+%o],r11\n", i,  i);
+end for;
+
+S        cat:= Sprintf("    add rsp,%o\n\n    pop rbx\n    pop rbp\n\n    jmp .reduce_once\n\n\n", pbytes +16);
+S        cat:= ".global fp_sq1\nfp_sq1:\n    mov rsi, rdi\n.global fp_sqr\nfp_sqr:\n    mov rdx, rsi\n\n    decq fpmul\n    incq fpsqr\n\n    jmp fp_mul\n";    
+
+
+PrintFile(Name, S);
+return S;
+end function;
+
+////////////////////////////////////////
+PrintPow := function(Name,  pwords)
+
+S               := ".global fp_pow\nfp_pow:\n    push rbx\n    mov rbx, rsi\n    push r12\n    push r13\n    push rdi\n    sub rsp, pbytes\n\n";
+S        cat:= "    mov rsi, rdi\n    mov rdi, rsp\n    call fp_copy\n\n    mov rdi, [rsp + pbytes]\n    lea rsi, [rip + fp_1]\n    call fp_copy\n\n";
+S        cat:= ".macro POWSTEP, k\n        mov r13, [rbx + 8*\\k]\n        xor r12, r12\n\n";
+S        cat:= "        0:\n        test r13, 1\n        jz 1f\n\n        mov rdi, [rsp + pbytes]\n        mov rsi, rsp\n        call fp_mul2\n\n";
+S        cat:= "        1:\n        mov rdi, rsp\n        call fp_sq1\n\n        shr r13\n\n                inc r12\n                test r12, 64\n        jz 0b\n.endm\n\n";
+
+for i := 0 to pwords-1 do
+	S        cat:= Sprintf("    POWSTEP %o\n", i);
+end for;
+
+S        cat:= "    add rsp, pbytes+8\n    pop r13\n    pop r12\n    pop rbx\n    ret\n\n\n";
+
+
+PrintFile(Name, S);
+return S;
+end function;
+
+////////////////////////////////////////
+PrintOthers := function(Name)
+S               := ".global fp_inv\nfp_inv:\n    lea rsi, [rip + p_minus_2]\n    jmp fp_pow\n\n\n";
+S        cat:= ".global fp_issquare\nfp_issquare:\n    push rdi\n    lea rsi, [rip + p_minus_1_halves]\n    call fp_pow\n    pop rdi\n\n";
+S        cat:= "    xor rax, rax\n    .set k, 0\n    .rept plimbs\n        mov rsi, [rdi + 8*k]\n        xor rsi, [rip + fp_1 + 8*k]\n        or rax, rsi\n";
+S        cat:= "         .set k, k+1\n    .endr\n    test rax, rax\n    setz al\n    movzx rax, al\n    ret\n\n\n";
+
+S        cat:= ".global fp_random\nfp_random:\n\n    push rdi\n    mov rsi, pbytes\n    call randombytes\n    pop rdi\n";
+S        cat:= "    mov rax, 1\n    shl rax, (pbits % 64)\n    dec rax\n    and [rdi + pbytes-8], rax\n\n    .set k, plimbs-1\n    .rept plimbs\n";
+S        cat:= "        mov rax, [rip + p + 8*k]\n        cmp [rdi + 8*k], rax\n        jge fp_random\n        jl 0f\n        .set k, k-1\n    .endr\n    0:\n    ret";
+
+
+PrintFile(Name, S);
+return S;
+end function;
+
+
+////////////////////////////////////////
+Print_Parameters := function(Name, p, pbits, pbytes, pwords)
+
+// Montgomery parameter R
+R              := 2^(64*pwords);
+RR           := IntegerRing(R);
+
+//Extracting p words and saving in file
+P := WordExtractor(Name, p, pwords, "p");
+
+// Computing -(1/p) mod R;
+pinv := IntegerRing()!(RR!(-1/p));
+
+//Extracting pinv words and saving in file
+Pinv := WordExtractor (Name, pinv, pwords, "inv_min_p_mod_r");
+
+// Printing zero
+S        := ".global fp_0\nfp_0:\n.zero pbytes\n\n";   
+PrintFile(Name, S);
+
+// 1 at Montgomery domain
+one := R mod p;
+
+//Extracting one words and saving in file
+ONE := WordExtractor (Name, one, pwords, "fp_1");
+
+// R^2 at Montgomery domain
+Rsqr := R^2 mod p;
+
+//Extracting Rsqr words and saving in file
+RsqrWords := WordExtractor (Name, Rsqr, pwords, "r_squared_mod_p ");
+
+//Extracting p-2 words and saving in file
+pminus2Words := WordExtractor (Name, p-2, pwords, "p_minus_2");
+
+//Extracting phalves words and saving in file
+phalvesWords := WordExtractor(Name, (p-1)div 2, pwords, "p_minus_1_halves");
+
+//Extracting pquarters words and saving in file
+pquartersWords := WordExtractor(Name, (p-3)div 4, pwords, "p_minus_3_quarters");
+
+//Printing footer
+S := PrintFooter(Name);
+
+return S;
+end function;
+
+////////////////////////////////////////
+Print_Assembly := function(Name, p)
+
+// size of p in bits, bytes ,words
+pbits       := Ceiling(Log(2, p));
+pbytes    := Ceiling(pbits/8); 
+if (pbytes mod 4 ne 0) then
+	pbytes +:= 4 - pbytes mod 4;
+end if; 
+pwords  := Ceiling(pbits/64);
+
+// Writing header;
+S := PrintHeader(Name, pbits, pbytes, pwords);
+
+// Writing parameters;
+S := Print_Parameters(Name, p, pbits, pbytes, pwords);
+
+// Printing Reduce Once
+S := PrintRedOnce(Name, pbytes);
+
+// Printing Add_Sub
+S:= PrintSub(Name);
+
+// Printing Mult
+S := PrintMul(Name, pbytes, pwords);
+
+// Printing Pow
+S:= PrintPow(Name,  pwords);
+
+// Printing Others
+S:= PrintOthers(Name);
+
+return 0;
+end function;
+
+////////////////////////////////////////
+Print_gmp := function(Name, p)
+
+// size of p in bits, bytes ,words
+pbits     := Ceiling(Log(2, p));
+pbytes  := Ceiling(pbits/8);
+if (pbytes mod 4 ne 0) then
+	pbytes +:= 4 - pbytes mod 4;
+end if; 
+pwords := Ceiling(pbits/64);
+
+// Writing header;
+S := PrintHeader(Name, pbits, pbytes, pwords);
+
+// Writing parameters;
+S := Print_Parameters(Name, p, pbits, pbytes, pwords);
+
+S := "";
+
+S        cat:= ".global fp_random\nfp_random:\n\n    push rdi\n    mov rsi, pbytes\n    call randombytes\n    pop rdi\n";
+S        cat:= "    mov rax, 1\n    shl rax, (pbits % 64)\n    dec rax\n    and [rdi + pbytes-8], rax\n\n    .set k, plimbs-1\n    .rept plimbs\n";
+S        cat:= "        mov rax, [rip + p + 8*k]\n        cmp [rdi + 8*k], rax\n        jge fp_random\n        jl 0f\n        .set k, k-1\n    .endr\n    0:\n    ret";
+
+PrintFile(Name, S);
+
+return 0;
+end function;
+
+
+//+++++++++++++++ Main ++++++++++++++++++//
+
+// Prime p_{9216}
+
+p_9216 :=	0x361D9E2CDA5B9C214B7BFDACEFEFE7EA33452A9AA9455C1321FC197BFA102E33\
+			1417F63D3B506B4D3DEA32834B20B10795A702809711D72250A72EF2CD41769B43C\
+			8C64B3EF520F4D719E347E010E6E317EEA9007132FFE2B96508FAC9A6D092E1C513F\
+			04F1969256195ACDFF32409AD840C7EBA5B4CBE1D29C4303A98F6B3CF079DBEDD0\
+			2041802A33BD5A0315F874E6EBDC33BBC2DF1488A051690DFBAE537C4E052144F97\
+			F7037C4C1F172F7E71E7CAA8E0FB37CFBA8B3F73F385A21B8FA7FD1598496A39F71\
+			21F108D5C5B4CC37C8EE9B39BDCC7E12A24F7A4C4E8C763AC5EF42E6041770C1B76\
+			F647DA1F25657D9F674278B12BFC08116F5568C9D5666B68B12A33C65E7AA80F6D1\
+			FBCD640FB733F1C50171FB73716BD2A6A75A630BAA844BDAF214A2973230D4D08F\
+			A7075BD67C450493934D5C64B5F0F1FC928D337A5E6AF3D880DE3014BD875B7982B\
+			CCB8120CFB4D52FF1EFA97B5C8BD78DE38E319450223B8F7FA498A56EE582CA6242\
+			6E055FCC4027EF4759D80519DF59C9236D536EBD3F6D1FE7A6C5A62FAFAC94B90D8\
+			114D5EE7BDCBBB2382200A94B81D9E037E15B857F9E5A2BB541625590865A6C8978\
+			21B408CC8DDA7FE9CDBA8239ECFDE3075599A1A42D2AFE5BD2C637F70B87F846BF\
+			DB3F426660C7B2E7C734248D3D6A6EC449D1A8A4DDE438E926B10F01FE2BC6D235\
+			B58EA7375580718299F934A7555FD9B077AE5C9D577ACFC5C93A60425BB93B0D58\
+			6377944AAAA8664073B41FDBE466C28DF3875B4F9B8026924F840956EE23F32D092\
+			4E975A89AD0F710006DC522F8CB3521D2BA88FBD685B86823FE747A3972FC203A9C\
+			84C9AB74BB8EDE2CF1232E142B774ED2FE0CA147706F5AA58E621D897D8E845AAF\
+			D705F0EA79487B731D62DBAEC66B6AB90BD54E52195BBF4E056CA73DCFC89B8A0\
+			6BD5E8A0D7DD7B5F054844E652BA2CD78608E057181015C66126DCF029B0694945\
+			3C1A5C2ECB151B07AF2A68A2C5DC46B715FD73698C21DD68582AA2605D8A4E24A6C\
+			BDFFA6736AF406C3236C706D636C4B80139E78598521A055AE0F5811AD3A5DB93CE\
+			A2B3FA70509A032D57063F1B554A89EF1CB045497E075F7A35B75DE535EA25805DF\
+			2287C26A95D1FAA06B79C3E2CD9C8F0B5F38D3EFE8F700C6EFB98C96E6DBBAA73C\
+			0BD61CFF2B1700F649D3716E371C81FBE2AB2A7972912B888FEA7184CE9E72BFB27\
+			CB34E149BACFD425795D56A851E93A8B960E1DE6982E5389E83F0F37C17C3FB23DF\
+			9E110C63EAF0002835BA04E73E5CB832CA5604BD94206DC05D53808F8B42A94ED28\
+			6F4E86F5120CB33FB70DD6DB9F36FFB33DD0847247A7A51E651EF3E0B91311CF04A\
+			B3C8A7E4CAFCB77783485CA97529CDD01F32C6CB376E363EB268D9B6CD1A3EC4D7\
+			8E6FDF8BF2F883EA3156BF8A9CCFB34E1103025CA7718D02FB433CAD3232B6466A7\
+			89CA8CFC2CAB98552C52C92A3D4E1CCEA30154C9D3E9CF606D70CF2980C842FB275\
+			C8864945BF70D37E24CD5358CEE9FB030F02995B0733DCD2178BFAAD60A8F3C2956\
+			C00B0033B1652923D834C40DB39E2CDAE8433F9EBE470D97890A2E586BF8956BBC3\
+			59DCE007492A23DC9C274373BFFB4B811FACB4B;
+
+// Prime p_{8192}
+
+p_8192 :=	0x5A11C8CCACEC287C2DDC6A693975C3D3DD4F7CA325A293414B7D768BA25A58FC52\
+			53845F37249E8E4726BA996FF1B83B8014317D8DF92FBE8FC6833C6C547169F690C319\
+			4CECF033EC946CE6A9C5A85C2CF926FF866B1FB139E3FC7D020028447396219927EDD8\
+			0BD966A4890B6300AAD396A72EB8E5DCDD578B35065C2A16AEE2E128062256DC62087\
+			D5E1EAFF2E3971D456B7F40B44DF0BAF88FDE638FA33AD919847F4FCDA0F6B8D0EEEB5\
+			5D849F490B22A4F1AE4E023F7B46A9D1ED72EE1E5EA9AB209197701B474E0C02A72859\
+			919B01B3FDF5FEB6317F6DFE1485D59CA707AD785FA700716673990CD9B10A6E705BBA\
+			CBF0DCE11ED909E40E15DA9AF1F2D684C96A1A844F6ADE7736C80DAB6D8401ED96F50\
+			2776945E382A578F7C423468E6FE2CC99CC47FF38D2D7FD2B3F9C6D3026B1D2E2BF6C4\
+			C80737D53200CCF7F9B29D2D1AB6EAE33DF40C6C5153F88B610A17A78122BD480B697\
+			EC16112F0DBF9D7875ECEE6BBB06375A48775D0338D7FA07E7557D0738A1652107C84D\
+			C38E033092674F6253114F7D7E6361485BEC0DE1F7B1379FDBD0292D5F37E8CEAA1D1F\
+			C24A0264AB518DB979EA722720FE137676F7A0E6DAC5C2EE238612F11E74A78423494C\
+			8C55A72063B265FD14E5C44B3C0436CDEC86B0D059B5EC505889F1581754717EB11C33\
+			2BF5529DE2415ECE8215A2F9749B06EDD3D088BD8EE3FE25FD0D70C5E2E8C0EFF88EC1\
+			8256705FA414C234EFE54383223A2E3FACEE26E783C64EE88B108AC333192DAED204351\
+			A281394B03A99093504E0BFA3A3C08E672F13ED1158E19ED66CA5012ADE163B754C6AD\
+			23CCED7C5A3672AAAAEC769EE779EBE153B77CE09705C01FDC9E541BF53E27F2F3D1A9\
+			C45898DF823299BC24AC8D9140862AEAAC94E784AE7FC548714B4F9AD71B6B81A1577E\
+			CD395F2B0460739E24A838D391F689975F7597EF409B9B297BE66D0EA74372035C9389A\
+			2876A1BA805DDE6C14D849682E83E2A273209928A3F5F8382FCDCD62CE564B38B4598F\
+			4997965B73335A490E8050751EE4C7C5FA90B4C4994873731150CADDF63AFFB42E13EF6\
+			4832A40213BC6AC3758AA86304C57068CF20C9360728EC70E215932E41CC330516E4A55\
+			22E095C9D072E3256688F81EB2F9C2A7802F0CE5DC7E092551411C7098F551C0933E7FB\
+			25B470FE9198812977D398531DC3A6E4EF3ED24BE0E398E1D9199A555046B38A7C00A0E\
+			5385B4D531D8B1012D35385B6A5C0E2A3773D6AF8159D932715F8CC8F50274C78CEC50D\
+			7BB187B6D6A71A249B403D7C75D1FAA11214E22FD8450891AE35A564AB4797C4DBA349\
+			89D539C9885E39F749895873B34B2CB66879D68085842AA13AFD0316491A850E9A752C\
+			65F20792D5C41D4C71AA79AC2BC16FF591621ED4809A9C387C2C883685674515AC73A\
+			70CA5AF47FDEBCF34BB;
+
+
+/ Prime p_{6144}
+
+p_6144 :=	0x510F408DC8F683686D1934EF929DAA8D2E67789404AE8B0B97C07DB3186C56A3308666D5B0B\
+			90A1688790C77849249A2DD7E3A7BE401D2AF5F6DA4657ADFE1FF5BC8983007C131C55B3BC65\
+			4DB18302807366891DD7CE3442D8F7C7C49023C0ED284E77981148550F006EBD06C91449BF4F\
+			D3FFB5411818AA51F3A1C97AD53836ACA7C128CD19B79C1B7386A356FEA70D8B09F1702913A6\
+			2B3B32150D56AD52276D21272BFD0FE454CE87E589171A20DE96745EDD24C1ECE75C868292ED\
+			BE265BE5E55308C0C84FABCB7C36AB0121A782265B016EAF515487A5BE59A8A6002B4AA52959\
+			37773960EDD9656A30E539A48F799F3A7F03207F219A2C490CD9B7156921AD11DB01ADAA8129\
+			7F43EB495476BCDF8CBC258176DCFE7EE02BA1DDB86E97693CB67F432471A7F39B54741FC250\
+			CDD2A73FA6387E2753ABC83C04408060845CB68239EBCE02B7396D6A568414A40A87989DBF2D\
+			6317F2C3BF4B2CA8BEBF682E095E27166A1D2EB9E9D454AC79D217D678992C1A44C4687D4C26\
+			78463E274749CB0C94845A028A5FA427B66DDB5702235DCD8B646F4716DD42323DDFC7905763\
+			20C1AA93D0CD5E897A33DBF5675E4B26B109080E8951900B06F48215BC83BB36536E2A877621\
+			B3173783BAE2792E467768844894078DEDAD1DA5613CCFBDF8CC86994E91CA457DAB666D383\
+			5D7238C869D1DAB81608334082CFEA07F3A9E7981D3C89FFF29C01E0E4E951C54F08419856066A\
+			3D76E3309534E6857D29C6630CBAA52BC0D17AC32A5714178D2B5384F699063C50C31DE90C25\
+			F506D61549ABA9E9A8223621CB06985A6503CE3B5CEF20060E2F1A0C2DD9B99056AA96882A14\
+			F9D1509D7A8E429563CE42203DC34E5AD3EA2EFB5A3FBD441565DB79FED6EC102AC578179115\
+			DA360AC8F5D0C04E6F7EB5963676A27C4EC6C35C456A32B068126F30D4A5AAC76236560C9B5D\
+			F2426B89D9F671D78CC7AE1166AF7A62C745D748E43FBDC914581251E352B0EC5248AA7EF2856\
+			CAA51A4F2EEC726FB5143417D2274C8E42B7FDF627C0CF4FBC47675420A9746BD2A3CBEDA012\
+			1624BBBA418B6A3;
+
+// Prime p_{5120}
+
+p_5120:=	0x4B8377CF507CA21A667812D33039CF2F6BA2EBF8106B774E7E8D0E15776FBBBE98BAD858C8F3D076C7BA3029\
+			A9963B1D8C68BBF501F2D7976AD35EB4A0BE46B7EC5FA56ABACF621B7DE8B5F91B5DD3EF225E9540EDD9204C9\
+			9BD43C133D8B1E252F679FD8CBBE41A1E77D7ABD84D5654073D4D63A95C7799AEAA3C015038D96FCA7505F531\
+			EAC50213A7DEF439A9EC50D799A5D736E05EC82E4013E60D3CEF98291A7F4CBEE79692BA0385CB1EBD758ADAD\
+			6E0BDD235F2F2F861C8F4230F732174BA253AB7948C436279DA46683D3654FFE3F95D1894344311DDDC4BE596E\
+			E9F9A08430F03935746EAB891535EAB1859B2CAE470DA76E47B371E2D8E4881777E7B25279F4CA8159B00B2BD2F\
+			004B777DFDE5613B3598281CA28EFC6F35F78BDE63D4CCB80BB2CA58F9EC47ECC4958DD24ADA4FE13B939E32E3\
+			C53C005E1BFCD537A0E7579938DB2B192806324782ADAB46CE1CDF75ACFC3E83819172EC3DCC8CCFC59A82C71\
+			B05836ACF3935B5762B28D154C8287BE183DD5CA93DB126E442C380AA90D494FD89AA90C5FBB03764ACD25A7\
+			939C9C0232736A51F1FC12E1D4706FC62BC43B1590161D86C62748C1A04A4E4D59DEB04C7AA2E616042692E277\
+			451F250158BBC39565EFF2FAB0857F3C57524474ACA601FBAABAB0D1FF5806605192186EB117756F9029C6694E4\
+			60D49A1EB993E49FD0A27BECF1D6E8423B3901EC1D273B846D0F0E35FBE116DBF85C78AF6B82B8D6B2933E65C9\
+			595B714E8B4357BB462ED7F7A46851E20D335F468780DE8AA237FA8322C0E907C5B9563D7D8D5B8CF1E0C2C54D\
+			4D4195D109261F4BAAD46E3A37AFF8234B5E0A0B7A166C9E02ED81AE416B05962937E5209406D3512169061D25\
+			4AF9A9F35EE0275BF49ABB3A13;
+
+// Prime p_{4096}
+
+p_4096:=	0x5E7717415B4CA2B9C447D91852630BDD26650A3BB26C86B690F049B4591045979B3908337C3FC\
+			E9453BDAD5DB6E3F21009C117DD6D5390FBF3924E59A2AFFCB043640CDA1CD63586511586409A8\
+			B182FB61117429E0FAD42661F279E970400FFC4BCEFE6A5B783100DAC14812B370ACFF9D051A0FB\
+			768F71FB7997BE77856D9284530ADB4A502D6EC3249D4EEA4683A8985A6B47BE6E7821DEF1AD02\
+			2E6ECAB6CBA7B9B3710891E6757B7B0EA38391F577E88B3F5AADC520FB7E8F8314D444512BA4A0\
+			C4C2765F310A825D48E93D16A3B848542F632F95EF18B06DAC453EE68530A8AD864CE7CFEA2ABEA\
+			DC289712A45C37A2496D6A0643ADBF7269D993760ED6855D97BA9DB63D9D28976E599D8F92E19D\
+			841ED1C3B26FCD527B24495B02AC1B19C8D8A6BFE007C68E6C44B4D5D26C6262D87B73F4A55FD9\
+			E324EE60EC15289442AE0D0EB23485C9760DB220C5F584BBD9A5671A61D5E08938F4FDC64215E5B\
+			3F9D2D3E15ED1B60E2C9D7F2E2DBDA4B10C1665D7FB1B9C76B02F4FD9D35FD9EB061D95CAFC12\
+			92BCCE8116D756C8905973DC84CFF577C5B68D30CA59CE3425CFB2F371E06C9D3AACF8DC03746E8\
+			A12DD786E8EDD70F9D4F1D32B79F32E14CD64D59D8DEC8B88D8AEE6235F05176385C0EA561D56A\
+			F87D0146535D892DB5C5F6D4A09051509BF0ECB893B4DADA515DABD369B93E277B867FD1FCF47604E79BCB;
+
+// Prime p_{3072}
+p_3072:=	0x4DC42C15DF05F5E8B614ABE930D40120CBA3E46CC76B116C5414F8E68D6AA4823334A6B96BE34B817111B8A6EADD\
+			DA78C15FE6209DC290B45CF91978605C0592ADEE5E3B4FF10FC32AC44A2AFD148CE750804BF51EBAC35672D0B1C55A\
+			89864397303E091F083DC64FCDF6B20BA4F50850F58EE87D61FB44244D9AF4BA5576FB632DF161F82FD7ED92832EA96\
+			E71457D44C06C9DCC52A9BBE7471414A60047837BB2DF2E9B0E7657DFE88D5E7D73460A6864AF967DF8D365D4B7858\
+			04666CFEE814A83CE2F0C3FEDE56CB49AAC2D704D850BDC2F63EC8D0BD6F94002658FE4158A92A98E44AA70E0D1F85\
+			8D62384EB5A08FC6C77AB0BFEDDD1D834251499FD7490FEFD77FCD1A5135BFE750AECFBA7374083166EFEAECCC7FF4\
+			08B1F100E1EB0FB136D66CC83DA548A44BD7618996A712FC0D9AC53C9C1425E18535D96E2CB1715948756F81C31EFF7\
+			D3DDF3E4A03C27A230DE555A78DA5D79EEBD7AF2C62929B22AB07DA6AFC768C1419BD07D2418E4CC9152360C819E2\
+			F6D45B68AF605EDFB;
+
+
+// Prime p_{2048}
+
+p_2048:=	0x438EFCAB10254C6497FEFC90E8196ED94D8854E8B3E19C53DDFFDCF1AEE53F12DBD1FC21337702\
+			53584EB12932F72ABB33A8779A1EC8B8C2B8523D6A302ABF284DD6024BF2F8FEAB6557EBE96D91AE\
+			DDC68049793337525393E73ABD17E3AA46095AC8A9F3CE2B0C30D2EDFE50198C647D84F102B5FDE2\
+			EAE33586D1208A10179844E5C09BAF59EC0DA1783672767ABB88C691B2D452A8AC7C4CB419996F45\
+			E75377D53E856CC9A39796620B3AD8A5D458E89497EF35BBB92842BBE4DBACC65E44084E1A73C76C\
+			B244454E851CF305ABA7BEC86FABAF787F6478407D7A9A56EEE111B0D22AB8ECAA95A98036C813C78\
+			8DC703F0CD8C4D9187790D615EA034943;
+
+// Prime p_{1792}
+// where the 1790-bit prime $p,$ is determined by the product of the first 207 small odd primes 
+//\(\ell_i\)'s different from 149, equal to $\frac{p+1}{4}.$ 
+
+p_1792 := 	0x306A3E55228AAD2F23959D2E410C035DD1740B70667F6FCB73E8\
+     			EB6EE635D92803A90552C4D23796FDE30371F8CFF315F6EA9D59D2\
+     			4F07717CF4B6F9E8D132780624DA87AA1EDAB004ADE1FD26B8A329\
+     			04A5AD00F90683AFE4DD34BB64C6A601641D9537F06611D48C8EDA\
+     			E6CB982ACBD3414C14613FED0BFB12C3D9632883EDE6B556009DBF\
+     			4FBAABFE136FAF8A4B737509515D637336182EB979BA4CDD45072D\
+     			6D3E7679D23338167C7E61F811B172FB174904B488681249538CE3\
+     			F92A3234C64CDE02FB981C9CEF9BE9B25B7FBF58770F4898063182\
+     			75C804F4EFEF04874B;
+
+// Prime p_{1024}
+p_1024 := 	0xECE55ED427012A9D89DEC879007EBD7216C22BC86F21A080683C\
+     			F25DB31AD5BF06DE2471CF9386E4D6C594A8AD82D2DF811D9C419E\
+     			C83297611AD4F90441C800978DBEED90A2B58B97C56D1DE81EDE56\
+     			B317C5431541F40642ACA4D5A313709C2CAB6A0E287F1BD514BA72\
+     			CB8D89FD3A1D81EEBBC3D344DDBE34C5460E36453;
+
+// Prime p_{512}
+p_511	 := 	0x58DED12D1672AAAE0CE8D57F8C2473C2353D2813D53C585A957A680C442FB\
+			FAD6C74DC880DEDF195B95975994A5C6F2AAA7F59608B7DB19705BB1DA3395ED78B;
+
+
+// Prime p_{256}
+p_256	 := 	0x7DADEB1B0CC2AFDBF9CB8C2E6FC3284E11C30E044A0F62F3DBA20AF9CFF32843;
+
+// Prime p_{127}
+p_127 	:= 0x4A68B26453EED99B18FDF4A9FC267893;
+
+//Choose here the prime that you want to test
+//p := p_9216;
+//p := p_8192;
+//p := p_6144;
+// p := p_5120;
+//p := p_4096;
+//p := p_3072;
+//p := p_2048;
+// p := p_1792;
+//p := p_1024;
+//p := p_511;
+//p := p_256;
+p := p_127;
+
+n := Ceiling(Log(2,p));
+if (n mod 64 ne 0) then
+	n +:= 64-n mod 64;
+end if;
+
+// Creating the assembly file fp_xx.s
+Name := Sprintf("fp%o.s", n);
+Print_Assembly(Name, p);
+
+// Creating the gmp file fp_xx.s
+Name := Sprintf("gmp%o.s", n);
+Print_gmp(Name, p);
+
+// Creating the gmp file fp_xx.s
+Name := Sprintf("uint%o.s", n);
+PrintUintHeader(Name, n div 64);
+
+
