@@ -12,6 +12,7 @@ from collections import OrderedDict
 from bisect import bisect_right
 
 # Global constants for the cost metric
+# (this just fakes an Enum type)
 ALL_GATES = 0
 T_GATES = 1
 
@@ -22,10 +23,52 @@ DW_COST  = 1
 COST_METRIC = ALL_GATES
 COST_MODEL = G_COST
 
-# Miscellaneous constants
-LOG_ADD_THRESHOLD = 10
 
+
+############################# GLOBAL PARAMETERS ##################################
+# Parameters for the estimation for which 
+#   a) one can reasonably argue for different values
+#   b) they may have a small or large effect on the results
+
+
+# What is the cost of a single DW-cost unit (a qubit-cycle) compared to
+# a single classical operation?
 QUANTUM_OVERHEAD = 10
+
+
+
+
+# Maximum allowable quantum memory
+MAX_CLASSICAL_MEMORY = 80
+MAX_QUANTUM_MEMORY = MAX_CLASSICAL_MEMORY - QUANTUM_OVERHEAD * 2.0/3.0
+
+
+# Cost of a CSIDH oracle
+# Currently a deliberate underestimate
+def get_oracle_cost(N, depth_limit):
+	# Single phase of size lg(N) for width;
+	# "ancilla" of lg(N) as a minimum for the cost
+	width = 1 + log2(N)
+	gates = 0
+	depth = 0
+	ancilla = -float('inf')
+	# # Bernstein et al. (Eurocrypt 2020) give a circuit
+	# # for the group action of CSIDH-512 with 2^40 gates. Assuming
+	# # that the cost scales quadratically with the group,
+	# # then the cost below gives the number of gates,
+	# # where the depth and ancilla assume perfect parallelization.
+	# gates = 56 + 2 * N/256
+	# depth = min(gates, depth_limit)
+	# ancilla = gates - depth
+	return QuantumCost(depth, width, gates, ancilla)
+
+# Memory access to N bits costs (SPATIAL_CONSTANT*N)^SPATIAL_EXPONENT
+SPATIAL_CONSTANT = math.log(100.0,2.0)
+SPATIAL_EXPONENT = 0.5
+
+############################# FIXED CONSTANTS ##################################
+# These are constants based on, e.g., the number of CNOT gates in a Toffoli
+# and should not need to be changed.
 
 # Global constants for costs of fundamental gates
 if COST_METRIC == T_GATES:
@@ -55,12 +98,13 @@ else:
 	CNOT_DEPTH = 0
 	CNOT_GATE = 0
 
-# Memory access to N bits costs (SPATIAL_CONSTANT*N)^SPATIAL_EXPONENT
-SPATIAL_CONSTANT = math.log(100.0,2.0)
-SPATIAL_EXPONENT = 0.5
+
 
 #For comparing costs (if they are within TOLERANCE, they are considered equal)
 TOLERANCE = 0.01
+
+# Threshold to stop trying to do exact logarithmic addition
+LOG_ADD_THRESHOLD = 5
 
 #########################################################
 # Functions to perform arithmetic on data where x represents 2^x
@@ -88,41 +132,92 @@ def log_subtract(x, y):
 	if x - y > LOG_ADD_THRESHOLD:
 		return x
 	return x + log2(1 - 2 ** (y - x))
-#########################################################
 
+
+def log_add_multi(values):
+	values.sort()
+	result = values[0]
+	for i in range(1,len(values)):
+		result = log_add(result, values[i])
+	return result
+
+#########################################################
+# Data type for quantum costs
 #########################################################
 # Width: the inputs and outputs
 # Ancilla: Temporary qubits
 class QuantumCost:
-	def __init__(self, depth, width, gates, ancilla = -float('inf')):
+	def __init__(self, depth, width, gates, ancilla = -float('inf'), classical_width = -float('inf'), details = None):
 		self.depth = depth
 		self.width = width
 		self.gates = gates
 		self.ancilla = ancilla
+		self.classical_width = classical_width
+		self.details = details
+
+	def __repr__(self):
+		result =  "\n  COST:\t" + str(get_cost(self)) + "\n  Gates:\t" + str(self.gates) + "\n  Depth:\t" + str(self.depth) + "\n  Qubits\n    Qubits:\t" + str(self.width) + "\n    Ancilla:\t" + str(self.ancilla) + "\n    Memory:\t" + str(self.classical_width) + "\n"
+		if self.details:
+			for key in self.details.keys():
+				result += "\n  " + key + ":\t" + self.details[key]
+		return result + "\n"
+
+	def total_hardware(self):
+		if self.width == float('inf') or self.ancilla == float('inf') or self.classical_width == float('inf'):
+			return float('inf')
+		return log_add_multi([self.width + QUANTUM_OVERHEAD * 2.0/3.0, self.ancilla + QUANTUM_OVERHEAD * 2.0/3.0, self.classical_width])
+
 
 def max_cost():
-	return QuantumCost(float('inf'), float('inf'), float('inf'), float('inf'))
+	return QuantumCost(float('inf'), float('inf'), float('inf'), float('inf'), float('inf'))
 
 def empty_cost():
 	return QuantumCost(-float('inf'), -float('inf'), -float('inf'))
 
+def merge_details(details1, details2):
+	if details1:
+		if details2:
+			return {**details1, **details2}
+		else:
+			return details1
+	else:
+		return details2
+
 #Cost of two sequential operations
-# Assume both are out-of-place, i.e., we can't reuse inputs/outputs
+# Assume both are out-of-place, i.e., we can't reuse quantum inputs/outputs
+# Assumes classical memory can be reused, however
 def sequential_cost(cost1, cost2):
 	return QuantumCost(
 		log_add(cost1.depth, cost2.depth),
 		log_add(cost1.width, cost2.width),
 		log_add(cost1.gates, cost2.gates),
-		max(cost1.ancilla, cost2.ancilla)
+		max(cost1.ancilla, cost2.ancilla),
+		max(cost1.classical_width, cost2.classical_width),
+		merge_details(cost1.details, cost2.details)
 		)
+
+def sequential_cost_in_place(cost1, cost2):
+	return QuantumCost(
+		log_add(cost1.depth, cost2.depth),
+		max(cost1.width, cost2.width),
+		log_add(cost1.gates, cost2.gates),
+		max(cost1.ancilla, cost2.ancilla),
+		max(cost1.classical_width, cost2.classical_width),
+		merge_details(cost1.details, cost2.details)
+		)
+
 
 def parallel_cost(cost1, cost2):
 	return QuantumCost(
 		max(cost1.depth, cost2.depth),
 		log_add(cost1.width, cost2.width),
 		log_add(cost1.gates, cost2.gates),
-		log_add(cost1.ancilla, cost2.ancilla)
+		log_add(cost1.ancilla, cost2.ancilla),
+		log_add(cost1.classical_width, cost2.classical_width),
+		merge_details(cost1.details, cost2.details)
 	)
+
+
 
 #Assume inputs become outputs
 def sequential_repeat(cost, iterations):
@@ -130,7 +225,9 @@ def sequential_repeat(cost, iterations):
 		iterations + cost.depth,
 		cost.width,
 		iterations + cost.gates,
-		cost.ancilla
+		cost.ancilla,
+		cost.classical_width,
+		cost.details
 	)
 
 def parallel_repeat(cost, iterations):
@@ -138,12 +235,16 @@ def parallel_repeat(cost, iterations):
 		cost.depth,
 		iterations + cost.width,
 		iterations + cost.gates,
-		iterations + cost.ancilla
+		iterations + cost.ancilla,
+		iterations + cost.classical_width,
+		cost.details
 	)
 
 
 # For DW-cost
 def get_cost(cost):
+	# if log_add(log_add(cost.width, cost.ancilla) + 2.0*QUANTUM_OVERHEAD/3.0, cost.classical_width) > MAX_CLASSICAL_MEMORY:
+	# 	return float('inf')
 	if COST_MODEL == G_COST:
 		return cost.gates
 	else:
@@ -156,6 +257,7 @@ def cost_compare(cost1, cost2):
 	else:
 		return False
 
+
 # Genuine comparator: returns 1 if cost1 < cost2, -1 if cost2 < cost1, 0 otherwise
 # First checks the global cost metric (gates or DW); if this is equal 
 # it checks width; if those are equal, it checks gates
@@ -164,14 +266,22 @@ def cost_compare(cost1, cost2):
 def cost_comparator(cost1, cost2):
 	comp = compare_with_tolerance(get_cost(cost1), get_cost(cost2))
 	if comp==0:
-		if compare_with_tolerance(cost1.width, cost2.width)==0:
+		hardware_compare = compare_with_tolerance(cost1.total_hardware(), cost2.total_hardware())
+		if hardware_compare==0:
 			return compare_with_tolerance(cost1.gates, cost2.gates)
 		else:
-			return compare_with_tolerance(cost1.width, cost2.width) # nasty bodge
+			return hardware_compare
 	else:
 		return comp
 
 def compare_with_tolerance(item1, item2):
+	if item1 == float('inf'):
+		if item2 == float('inf'):
+			return 0
+		else:
+			return -1
+	elif item2 == float('inf'):
+		return 1
 	if item1 - item2 < -TOLERANCE:
 		return 1
 	elif item2 - item1 < -TOLERANCE:
@@ -179,9 +289,8 @@ def compare_with_tolerance(item1, item2):
 	else:
 		return 0
 
-#########################################################
 
-
+#######################################################
 
 class DepthError(Exception):
 	pass
@@ -189,11 +298,17 @@ class DepthError(Exception):
 
 # Returns the value c_r^-1, representing the bias 
 # to expected values (see appendix)
+COLLIMATION_ADJUSTORS = [0]*50
+COLLIMATION_ADJUSTORS[2] = -log2(1.5)
+for exp_r in range(3,50):
+	COLLIMATION_ADJUSTORS[exp_r] = -0.5 * log2(exp_r * math.pi/3)
+
 def collimation_adjustor(exp_r):
-	if exp_r > 2:
-		return 0.5 * log2(exp_r * math.pi/3)
-	else:
-		return log2(1.5)
+	return COLLIMATION_ADJUSTORS[exp_r]
+	# if exp_r > 2:
+	# 	return -0.5 * log2(exp_r * math.pi/3)
+	# else:
+	# 	return -log2(1.5)
 
 
 # Returns the depth of an r-ary tree
@@ -205,10 +320,10 @@ def get_tree_depth_EXP(N, L, S0, exp_r):
 	# the expected value
 	# See footnote 7 of Peikert 2020
 	
-	# Each layer reduces the size by a multiplicative factor of L^{r-1}/adjustor
+	# Each layer reduces the size by a multiplicative factor of L^{r-1}*adjustor
 	# We start with a size of N, we want it to reach S0
-	d = max(0, math.ceil((N - S0) / ((exp_r - 1) * L - collimation_adjustor(exp_r))))
-	return d
+	d = max(0, math.ceil((N - S0) / ((exp_r - 1) * L + collimation_adjustor(exp_r))))
+	return int(d)
 
 # Returns the total size of the tree,
 # i.e., the total number of colimations
@@ -219,46 +334,28 @@ def log_tree_size(exp_arity, exp_depth):
 		cost = log_add(cost, i*arity)
 	return cost
 
-# Cost of a CSIDH oracle
-# Deliberate underestimate
-def get_oracle_cost(N, depth_limit):
-	# Single phase of size lg(N) for width;
-	# "ancilla" of lg(N) as a minimum for the cost
-
-	# gates = 40 + 2 * N/256
-	# depth = max(log2(N), depth_limit)
-	width = 1 + log2(N)
-	# ancilla = gates - depth - width
-	# return QuantumCost(depth, width, gates, ancilla)
-	return QuantumCost(0, width, 0, -float('inf'))
-
 #Returns the cost of each collimation step
-def get_collimation_cost(L,exp_r, phase_size, depth_budget):
+def get_collimation_cost(L,exp_r, EXP_phase_size, depth_budget):
 	#Main cost: the QRAM look-ups
 	
-
 	Lmax = 3.0 + L; #Lmax = 8L
 	# Following Equation 3.5 from Peikert 2020
 
-	permutation_cost = collimation_permutation_cost(depth_budget-1, L, phase_size, exp_r)
+	# Cost to compute the permutation (either classical or quantum)
+	permutation_cost = collimation_permutation_cost(depth_budget-1, L, EXP_phase_size, exp_r)
+	if permutation_cost.depth > depth_budget:
+		raise DepthError('Cannot merge lists')
+	# Remaining depth
 	depth_budget = log_subtract(depth_budget, permutation_cost.depth)
-	#As far as I can tell:
+
 	# Measure and compute the permutation (negligible)
 	# (1) One look-up for the new value of j (indexed by (j_1,...,j_r))
 	# (2) One uncompute lookup for the old values of j
 	# (3) One uncompute look-up for the value of b(j) for the new j
 
-	# simple_cost1 = get_basic_lookup_cost(Lmax, log2(Lmax))
-	# simple_cost2 = get_basic_lookup_cost(Lmax, 0)
-	# simple_cost = sequential_cost(simple_cost1, sequential_cost(simple_cost2, simple_cost2))
-
-	# Since the sequential look-up doesn't always fit the depth budget,
-	# just tests values until it fits
+	# Since the look-up won't always fit the depth budget, tests values until it fits
 	depth = depth_budget + 1
 	internal_depth_budget = depth_budget
-	cost1 = max_cost()
-	cost2 = max_cost()
-	cost3 = max_cost()
 	while depth > depth_budget and internal_depth_budget > exp_r: 
 		log3 = log2(3.0)
 		cost1 = get_lookup_cost(Lmax, log2(Lmax),  internal_depth_budget - log3)
@@ -268,63 +365,59 @@ def get_collimation_cost(L,exp_r, phase_size, depth_budget):
 		internal_depth_budget -= 1
 	#Total look-up cost
 	cost = sequential_cost(cost1, sequential_cost(cost2, cost3))
-	cost.width = log_add(log2(L), log2(phase_size)) + log2(exp_r)
-
-	# # If the simple cost was cheaper and fit the depth limit, just take that
-	# if simple_cost.depth < depth_budget and cost_compare(simple_cost, cost):
-	# 	cost = simple_cost
-
-	# # Alternatively we can use a wide look-up
-	# wide_cost1 = get_wide_lookup_cost(Lmax, log2(Lmax))
-	# wide_cost2 = get_wide_unlookup_cost(Lmax, exp_r * log2(Lmax))
-	# wide_cost3 = get_wide_unlookup_cost(Lmax, phase_size)
-
-	# wide_cost = sequential_cost(wide_cost1, parallel_cost(wide_cost2, wide_cost3))
-
-	# wide_cost.width = log_add(log2(L), log2(phase_size)) + log2(exp_r)
-
-	# #Return whichever cost fits the depth budget or whichever is cheaper
-	# if depth > depth_budget or cost_compare(wide_cost, cost):
-	# 	cost = wide_cost
-	return parallel_cost(cost, permutation_cost)
+	cost.width = log_add(log2(Lmax), log2(EXP_phase_size)) + log2(exp_r)
 
 
-def collimation_permutation_cost(depth_budget, table_size, phase_size, exp_r):
+	return sequential_cost(cost, permutation_cost)
+
+
+# Adjusts classical cost to ensure it includes latency terms and
+# fits a depth budget
+def adjust_classical_cost(cost, depth_budget):
+	# Latency
+	latency = (cost.classical_width + SPATIAL_CONSTANT) * SPATIAL_EXPONENT
+	# Depth must below the budget, but at least equal to the latency
+	cost.depth = max(min(cost.gates, depth_budget), latency)
+	# If we were forced to parallelize, bump up the width. 
+	parallelizing_width = max(cost.gates - cost.depth, 0)
+	parallelizing_latency = (parallelizing_width + SPATIAL_CONSTANT) * SPATIAL_EXPONENT
+	# Add to the cost
+	cost.classical_width = log_add(cost.classical_width, parallelizing_width)
+	cost.depth = log_add(cost.depth, parallelizing_latency)
+	# If it's too deep:
+	if cost.depth > depth_budget:
+		cost = max_cost()
+	return cost
+
+def collimation_permutation_cost(depth_budget, table_size, EXP_phase_size, exp_r):
+	phase_size = log2(EXP_phase_size)
+	r = log2(exp_r)
+	index_size = log2(table_size)
+
 	# Classical approach
-	# Assume "depth" is a square root 
+	# Assume "depth" is a square root  (for latency)
 	classical_cost =  QuantumCost(
-		(table_size + SPATIAL_CONSTANT)*SPATIAL_EXPONENT, # depth for layout
+		0, #depth
 		0, # width
-		table_size * (exp_r - 1) + log2(table_size), # gates
-		0
+		table_size * (exp_r - 1) + index_size, # gates
+		-float('inf'),
+		table_size + r + phase_size, # minimum classical width
+		details = {"permutation":"basic"}
 	)
+	classical_cost = adjust_classical_cost(classical_cost, depth_budget)
 
-	# Quantum approach
-	# Get costs to look-up and un-lookup all the phases
-	lookup_cost = parallel_repeat(get_wide_lookup_cost(table_size, log2(phase_size)), exp_r)
-	lookup_cost = sequential_cost(lookup_cost, parallel_repeat(get_wide_unlookup_cost(table_size, log2(phase_size)), exp_r))
-	# Addition costs (log-depth, linear cost in the phase size)
-	grover_oracle = sequential_cost(lookup_cost, 
-		QuantumCost(log2(log2(exp_r)) + log2(log2(phase_size)), log2(exp_r) + log2(table_size), log2(exp_r) + log2(phase_size), log2(exp_r) + log2(phase_size))
-		)
-	# This is how many iterations we are allowed 
-	grover_iterates = depth_budget - grover_oracle.depth
-	# How much parallelism will be required
-	grover_parallelism = (exp_r/2.0) * table_size - grover_iterates
-	# Cost of each machine for one run
-	grover_cost = sequential_repeat(grover_oracle, grover_iterates)
-	# Cost to find one solution
-	grover_cost = parallel_repeat(grover_cost, grover_parallelism)
-	# Cost for all solutions (coupon collection)
-	grover_cost = parallel_repeat(grover_cost, table_size + log2(table_size)) 
-
+	grover_cost = get_grover_cost(depth_budget, table_size, EXP_phase_size, exp_r)
 	#Classical merging approach
 	s = math.floor(exp_r/2)
 	merge_cost = QuantumCost(
-		(table_size + SPATIAL_CONSTANT)*SPATIAL_EXPONENT, # for layout
+		0,
 		0, 
-		log_add(table_size * (exp_r - s) + log2(s) + log2(table_size), s * table_size + log2(s) + log2(table_size)),
-		0)
+		log_add(table_size * (exp_r - s) + log2(s) + index_size, s * table_size + log2(s) + index_size),
+		-float('inf'),
+		log_add(table_size*s, (exp_r - s) + table_size) + phase_size,  # classical width
+		details = {"permutation":"merge"}
+	)
+	merge_cost = adjust_classical_cost(merge_cost, depth_budget)
 
 	# Return cheapest cost
 	if cost_compare(merge_cost, classical_cost):
@@ -335,7 +428,43 @@ def collimation_permutation_cost(depth_budget, table_size, phase_size, exp_r):
 	else:
 		return grover_cost
 
+def get_grover_cost(depth_budget, table_size, EXP_phase_size, exp_r):
+	phase_size = log2(EXP_phase_size)
+	r = log2(exp_r)
+	index_size = log2(table_size)
+	# Quantum approach
+	# Get costs to look-up and un-lookup all the phases
+	# Use shortest depth known
+	if not (table_size, phase_size) in lookup_costs:
+		get_lookup_cost(table_size, phase_size, depth_budget)
+	key_list = list(lookup_costs[(table_size, phase_size)].keys())
+	lookup_cost = parallel_repeat(lookup_costs[(table_size, phase_size)][key_list[0]], r)
+	if not (table_size in unlookup_costs):
+		get_unlookup_cost(table_size, depth_budget)
+	key_list = list(unlookup_costs[table_size].keys())
+	grover_oracle = sequential_cost(lookup_cost, parallel_repeat(unlookup_costs[table_size][key_list[0]], r))
+	# Addition costs (log-depth, linear cost in the phase size)
+	grover_oracle = sequential_cost(lookup_cost, 
+		QuantumCost(log2(r) + log2(phase_size), r + index_size, r + phase_size, r + phase_size)
+		)
+	# This is how many iterations we are allowed 
+	grover_iterates = depth_budget - grover_oracle.depth
+	# How much parallelism will be required
+	# Search space is L^r, but there are ~L solutions
+	grover_parallelism = ((exp_r - 1) * table_size / 2.0) - grover_iterates
+	# Cost of each machine for one run
+	grover_cost = sequential_repeat(grover_oracle, grover_iterates)
+	# Cost to find one solution
+	grover_cost = parallel_repeat(grover_cost, grover_parallelism)
+	# Cost for all solutions (coupon collection)
+	grover_cost = parallel_repeat(grover_cost, table_size + index_size) 
 
+	# Latency
+	grover_cost.depth = log_add(grover_cost.depth, SPATIAL_EXPONENT * (SPATIAL_CONSTANT + log_add(grover_cost.width, grover_cost.ancilla)))
+	grover_cost.details = {"permutation":"grover"}
+	return grover_cost
+
+######################### QRAM Costs #########################################
 
 # Global dictionaries to avoid recomputation
 # These are dictionaries indexed by (table_size, word_size) and (table_size), respectively
@@ -435,7 +564,7 @@ def get_wide_lookup_cost(table_size, word_size):
 	# We also have to fanout the controls, adding to the width
 	width = log_add(word_size, log_table_size)
 	ancilla = table_size + log_add(log2(1.5) + log_add(word_size, 0), log_subtract(log_table_size, 1))
-	return QuantumCost(depth, word_size, gates, ancilla)
+	return QuantumCost(depth, word_size, gates, ancilla, details = {"Lookup": "wide"})
 
 def get_wide_unlookup_cost(table_size, word_size):
 	# Assume we measure the outputs in the X-basis
@@ -459,7 +588,7 @@ def get_berry_lookup_cost(table_size, word_size, k):
 	gates = log_add(gates, uncost.gates)
 	depth = log_add(depth, uncost.depth)
 	ancilla = max(k + word_size, uncost.ancilla) # Uncomputation uses no extra input/output
-	return QuantumCost(depth, width, gates, ancilla)
+	return QuantumCost(depth, width, gates, ancilla, details={"Lookup": "berry-"+str(k)})
 
 # Berry et al. un-lookup
 def get_berry_unlookup_cost(table_size, k):
@@ -473,7 +602,7 @@ def get_berry_unlookup_cost(table_size, k):
 	gates = log_add(In_gates, S_gates)
 	depth = log_add(In_depth, S_depth)
 	ancilla = k
-	return QuantumCost(depth, width, gates, ancilla)
+	return QuantumCost(depth, width, gates, ancilla, details={"Lookup":"berry-"+str(k)})
 
 		
 # Babbush et al. look-up
@@ -482,9 +611,11 @@ def get_basic_lookup_cost(table_size, word_size):
 		table_size + log_add(BOTH_AND_DEPTH, 1 + log2(word_size - 1) + CNOT_DEPTH), # depth
 		log_add(log2(table_size), log2(word_size)),
 		table_size + log_add(BOTH_AND_GATES, log2(1.5) + word_size + CNOT_GATE),
-		log2(table_size)
+		log2(table_size),
+		details={"Lookup":"basic"}
 	)
 
+########################### FULL COLLIMATION SIEVE COSTS ####################################
 
 
 # Gets the cost of the entire attack under a depth limit,
@@ -499,6 +630,9 @@ def get_basic_lookup_cost(table_size, word_size):
 def depth_limited_cost(depth_limit, N, L, S0, exp_r):
 	# Discard probability
 	delta = 0.02
+
+	sieve_details = dict()
+
 	# Active qubits to store the phase vector
 	# Since we store the phase multipliers in quantum memory continously,
 	# it contains N
@@ -509,16 +643,16 @@ def depth_limited_cost(depth_limit, N, L, S0, exp_r):
 	#Base layer L: Must be larger for the collimation
 	# First we need the height of the states just below
 	adjustor = collimation_adjustor(exp_r)
-	first_height = S0  + (exp_sieve_depth - 1) * ((exp_r - 1) * L - adjustor)
+	first_height = S0  + (exp_sieve_depth - 1) * ((exp_r - 1) * L + adjustor)
 	Lbase = (1.0/exp_r) * (L + N - first_height)
 
 	# This is the number of leaves of the collimation tree
 	# Each layer is r-ary, except the last layer, which is log(L)-ary,
 	# since we need to produce an initial phase vector of length L from 
 	# phase vectors of length 2
-	num_oracle_calls = exp_sieve_depth * math.log(exp_r, 2.0) + math.log(Lbase, 2.0) #log
+	num_oracle_calls = exp_sieve_depth * log2(exp_r) + log2(Lbase) 
 	# But each oracle call has some probability of failure:
-	num_oracle_calls -= exp_sieve_depth * math.log(1.0 - delta, 2.0)
+	num_oracle_calls -= exp_sieve_depth * log2(1.0 - delta)
 	# Extra factor 2^0.3 from Peikert:
 	num_oracle_calls += 0.3
 	# If exp_sieve_depth is the height of the collimation tree, we need at least exp_sieve_depth sequential sieving steps
@@ -529,6 +663,8 @@ def depth_limited_cost(depth_limit, N, L, S0, exp_r):
 	# Cost for a single collimation
 	# Each phase goes up to N, so that is the size of b(j)
 	sieve_cost = get_collimation_cost(L, exp_r, log2(N), sieve_depth_budget)
+
+	# Double-check that the depth is short enough
 	sequential_sieve_depth = sieve_cost.depth + log2(exp_sieve_depth)
 	if sequential_sieve_depth > depth_limit:
 		raise DepthError('Depth limit too small for L')
@@ -541,7 +677,7 @@ def depth_limited_cost(depth_limit, N, L, S0, exp_r):
 	depth_before_final_sieve = log_subtract(depth_limit, sequential_sieve_depth)
 	# Within the remaining space, we need to fit all the oracle calls. Thus, this is the number
 	# of oracle calls that must happen in parallel in each step
-	oracle_cost = get_oracle_cost(N, depth_before_final_sieve - num_oracle_calls)
+	oracle_cost = get_oracle_cost(N, depth_before_final_sieve)
 	if oracle_cost.depth > depth_limit:
 		raise DepthError('Depth limit too small for oracle')
 	#Find the necessary depth of the tree
@@ -556,11 +692,13 @@ def depth_limited_cost(depth_limit, N, L, S0, exp_r):
 	naive_collimation_depth = tree_size + sieve_cost.depth
 
 	# Minimum number of vectors to store at once
-	vectors_in_memory = log2(exp_r * exp_sieve_depth)
+	vectors_in_memory = log2((exp_r - 1) * exp_sieve_depth)
 
-	parallel_collimation = max(naive_collimation_depth - log_subtract(depth_limit, oracle_cost.depth), 0)
+
+	parallel_collimation = naive_collimation_depth - log_subtract(depth_limit, oracle_cost.depth)
 	#Prevent overparallelizing
-	parallel_collimation = min(tree_size, parallel_collimation)
+	# The most collimations possible at once is the last layer of the tree, which is r^h
+	parallel_collimation = min(exp_sieve_depth * log2(exp_r), parallel_collimation)
 	parallel_oracle_calls = min(parallel_oracle_calls, num_oracle_calls)
 
 	#Prevent "under"parallelizing
@@ -569,17 +707,19 @@ def depth_limited_cost(depth_limit, N, L, S0, exp_r):
 
 	
 	#If we produce more oracle calls than collimations, we store the extra in memory
-	if parallel_oracle_calls > parallel_collimation + math.log(Lbase, 2.0):
+	if parallel_oracle_calls - log2(Lbase) > parallel_collimation:
+		sieve_details["extra_oracle"] = "True"
 		total_oracle_depth = oracle_cost.depth + num_oracle_calls - parallel_oracle_calls
 		#How many collimations happen in this time?
-		sieve_during_oracle =  total_oracle_depth + parallel_collimation - sieve_cost.depth
+		sieve_during_oracle =  (total_oracle_depth - sieve_cost.depth) + parallel_collimation
 		# How many vectors does this collimate?
-		sieved_vectors = max(sieve_during_oracle + math.log(Lbase, 2.0), num_oracle_calls)
+		sieved_vectors = max(sieve_during_oracle + log2(Lbase), num_oracle_calls)
 		# How many remain in memory?
 		vectors_in_memory = max(vectors_in_memory, log_subtract(num_oracle_calls, sieved_vectors))
 	# If the collimator must parallelize, we need more oracle calls
+	# (see end of Section III.D)
 	if parallel_oracle_calls > 0:
-		parallel_oracle_calls = max(parallel_oracle_calls, parallel_collimation + math.log(Lbase, 2.0))
+		parallel_oracle_calls = max(parallel_oracle_calls, parallel_collimation + log2(Lbase))
 
 	
 
@@ -589,16 +729,25 @@ def depth_limited_cost(depth_limit, N, L, S0, exp_r):
 	total_oracle_costs = parallel_repeat(oracle_cost, parallel_oracle_calls)
 	total_oracle_costs = sequential_repeat(total_oracle_costs, sequential_oracle_calls)
 
-	# We need tree_size total collimations, but we cannot parallelize more than the depth of the tree
-	sequential_collimation = max(tree_size - parallel_collimation, log2(exp_sieve_depth))
-	parallel_collimation = tree_size - sequential_collimation
+	# Find how many parallel repetitions
+	sequential_collimation = tree_size - parallel_collimation
+	sieve_details["collim-par"] = str(parallel_collimation)
 
-	total_sieve_costs = parallel_repeat(sieve_cost, parallel_collimation)
-	total_sieve_costs = sequential_repeat(total_sieve_costs, sequential_collimation)
+	# In this case, we parallelize so much that we finish the first layer first
+	if sequential_collimation < log2(exp_sieve_depth): 
+		sieve_details["Excess width"] = "True"
+		total_sieve_costs = empty_cost()
+		for i in range(exp_sieve_depth):
+			total_sieve_costs = sequential_cost_in_place(total_sieve_costs, parallel_repeat(sieve_cost, i * log2(exp_r)))
+	else: # Simply collimate as fast as possible		
+		total_sieve_costs = parallel_repeat(sieve_cost, parallel_collimation)
+		total_sieve_costs = sequential_repeat(total_sieve_costs, sequential_collimation)	
+		sieve_details["Excess width"] = "False"
 
 	# Add sieve and oracle costs, assuming they are sequential
 	costs = sequential_cost(total_sieve_costs, total_oracle_costs)
 	costs.ancilla = log_add(costs.ancilla, vectors_in_memory + phase_vector_qubits)
+	costs.details = {**sieve_details, **costs.details}
 
 	return [costs, num_oracle_calls, exp_sieve_depth, tree_size]
 
@@ -618,11 +767,9 @@ def CSIDH_break_cost(max_depth, classical_budget, p, L, exp_r):
 	N = p/2.0
 	S = L
 	bits_per_run = S - 2
-	min_memory = 10 
-	max_memory = 1.5 * max_depth
 
 	if (N < classical_budget): # We can just break it classically
-			c_sieve_cost = [QuantumCost(0,0,0), 0, 0]
+			c_sieve_cost = [QuantumCost(0,N,0), 0, 0]
 	else:
 		depth = max_depth + 1
 		internal_depth_limit  = max_depth 
@@ -634,7 +781,7 @@ def CSIDH_break_cost(max_depth, classical_budget, p, L, exp_r):
 		# Peikert claims each repetition reveals roughly S - 2 bits of the secret
 		# We only need N - classical_budget bits; we brute-force the rest
 		# Thus, we need to run the sieve num_repetitions times
-		num_repetitions = math.log(math.ceil((N - classical_budget)/bits_per_run),2.0)
+		num_repetitions = log2(math.ceil((N - classical_budget)/bits_per_run))
 		parallel_reps = num_repetitions + c_sieve_cost[0].depth - max_depth
 		if parallel_reps > 0:
 			sequential_reps = num_repetitions - parallel_reps
@@ -643,8 +790,9 @@ def CSIDH_break_cost(max_depth, classical_budget, p, L, exp_r):
 			sequential_reps = num_repetitions
 			
 		c_sieve_cost[0] = sequential_repeat(c_sieve_cost[0], sequential_reps)
-		c_sieve_cost[1] += num_repetitions
-		c_sieve_cost[3] += num_repetitions
+		c_sieve_cost[1] += num_repetitions # oracle calls
+	  # c_sieve_cost[2] 				   # sieve depth does not change when repeated
+		c_sieve_cost[3] += num_repetitions # collimations
 
 	# If we break the loop
 	if c_sieve_cost[0].depth > max_depth:
@@ -657,7 +805,9 @@ def CSIDH_break_cost(max_depth, classical_budget, p, L, exp_r):
 # 0: QuantumCost of the c-sieve
 # 1: number of oracle calls
 # 2: depth of each sieving step
-# 3: the phase vector length L
+# 3: total number of collimations
+# 4: the phase vector length L
+# 5: the arity r
 def CSIDH_depth_costs(depth_range, classical_budget, p, r_range):
 	# How much are we willing to exceed the depth budget?
 	tolerance = 0
@@ -669,15 +819,16 @@ def CSIDH_depth_costs(depth_range, classical_budget, p, r_range):
 	# This is the overall best cost for any depth limit
 	best_cost = [max_cost(), -1, 0,-1, -1, -1]
 	for max_depth in depth_range:
+		# Minimum cost for this depth limit
 		min_cost = [max_cost(), -1, 0,-1, -1, -1]
 		min_L = 10
 		max_L = int(1.5*max_depth)
-		# Try different memory sizes
+		# Try different memory sizes and arities
 		for exp_r in r_range:
 			for L in range(min_L, max_L+1):
 				try:
 					csieve_cost = CSIDH_break_cost(max_depth, classical_budget, p, L, exp_r)
-					if csieve_cost[0].depth <= max_depth + tolerance:
+					if csieve_cost[0].depth <= max_depth + tolerance and csieve_cost[0].total_hardware() < MAX_CLASSICAL_MEMORY:
 						if cost_compare(csieve_cost[0], min_cost[0]):
 							min_cost = csieve_cost + [L, exp_r]
 				except DepthError:
@@ -685,7 +836,7 @@ def CSIDH_depth_costs(depth_range, classical_budget, p, r_range):
 			
 		
 
-		# Did it find any L that fit the depth limit?
+		# Did it find any L,r that fit the depth limit?
 		if min_cost[4]>0: 
 			# It happens that previous depth limits actually give lower costs
 			# This simply uses that new parameterization if so
@@ -709,6 +860,7 @@ def CSIDH_depth_costs(depth_range, classical_budget, p, r_range):
 	return results
 
 
+############################ FORMATTING #####################################33
 
 # Header for CSV
 def CSIDH_costs_head_string():
@@ -720,20 +872,27 @@ def CSIDH_costs_head_string():
 			head_string += "Gates, "
 	else:
 		head_string += "Depth-width, "
-	return head_string + "Depth, Width, Oracle Calls, Sieve Depth, Collimations, Vector Length, Arity\n"
+	return head_string + "Depth, Total Hardware, Width, Oracle Calls, Sieve Depth, Collimations, Vector Length, Classical Memory, Arity\n"
 
 # Formats costs as CSV, expecting output of CSIDH_depth_costs
 def CSIDH_costs_as_string(costs, p, max_depth):
-	return (str(p) + ", "
-		 + str(max_depth) + ", "
+	if costs[0].details:
+		detail_string = ""
+		for key in costs[0].details.keys():
+			detail_string += key + ":" + costs[0].details[key] + ", "
+	return (str(p) + ", " + str(max_depth) + ", "
 		 + str(get_cost(costs[0])) + ", "
 		 + str(costs[0].depth) + ", "
+		 + str(log_add(costs[0].width, log_add(costs[0].ancilla, costs[0].classical_width))) + ", "
 		 + str(log_add(costs[0].width, costs[0].ancilla)) + ", "
 		 + str(costs[1]) + ", "
 		 + str(costs[2]) + ", "
 		 + str(costs[3]) + ","
 		 + str(costs[4]) + ","
-		 + str(costs[5]) + "\n")
+		 + str(costs[0].classical_width) + ","
+		 + str(costs[5]) + ","
+		 + detail_string + "\n")
+
 
 
 
@@ -767,7 +926,7 @@ def Validate_costs():
 
 
 
-Validate_costs()
+# Validate_costs()
 print("Costs validated")
 
 
@@ -789,35 +948,43 @@ def Estimate_and_write(
 	classical_budget,
 	csv_filename
 	):
+	if COST_MODEL == DW_COST:
+		csv_filename += "_dw"
+	csv_filename += ".csv"
 	csv_file = Initialize_file(csv_filename, CSIDH_costs_head_string())
 	for p in p_range:
 		print("p = " + str(p))
 		costs = CSIDH_depth_costs(depth_range, classical_budget, p, r_range)
 		csv_file.write("\n\n" + str(p) + "\n")
 		for depth in costs:	
-			csv_file.write(CSIDH_costs_as_string(costs[depth], p, depth))
+			if not get_cost(costs[depth][0]) == float('inf'):
+				csv_file.write(CSIDH_costs_as_string(costs[depth], p, depth))
 
 
 #Set estimation parameters
 classical_budget= 64
 depth_range = range(40,97)
 r_range = range(2,30)
-p_range = range(2**10, 12288+1, 2**10)
+#p_range = range(2**10, 12288+1, 2**10)
+p_range = [1024, 1792, 2048, 3072, 4096, 5120, 6144, 8192, 9216, 12288]
+NIST_ps = {0: [1024, 1792, 2048], 1: [3072, 4096], 2:[5120, 6144], 3:[8192, 9216]}
+NIST_mem_limits = {0: 80, 1: 80, 2: 80, 3: 80}
 
-COST_MODEL  = G_COST
-Estimate_and_write(
-	p_range, 
-	depth_range, 
-	r_range, 
-	classical_budget, 
-	'sieve_costs.csv'
-	)
-
-COST_MODEL  = DW_COST
-Estimate_and_write(
-	p_range, 
-	depth_range, 
-	r_range, 
-	classical_budget, 
-	'sieve_costs_dw.csv'
-	)
+for model in [G_COST, DW_COST]:
+	COST_MODEL = model
+	for level in NIST_ps.keys():
+		MAX_CLASSICAL_MEMORY = NIST_mem_limits[level]
+		Estimate_and_write(
+			NIST_ps[level],
+			depth_range,
+			r_range,
+			classical_budget,
+			'sieve_costs_'+str(level))
+	MAX_CLASSICAL_MEMORY = float('inf')
+	Estimate_and_write(
+		p_range, 
+		depth_range, 
+		r_range, 
+		classical_budget, 
+		'sieve_costs_unlimited'
+		)
