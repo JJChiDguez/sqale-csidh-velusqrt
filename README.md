@@ -1,6 +1,6 @@
-# The SQALE of CSIDH: Square-root velu Quantum-resistant isogeny Action with Low-weight Exponents
+# The SQALE of CSIDH: Square-root velu Quantum-resistant isogeny Action with Low Exponents
 
-This repository ilustrates the practical implications of the quantum security analysis of [**The SQALE of CSIDH: Square-root velu Quantum-resistant isogeny Action with Low-weight Exponents**](), which are based on and detailed study of the Kuperberg's algorithm.
+This repository ilustrates the practical implications of the quantum security analysis of [**The SQALE of CSIDH: Square-root velu Quantum-resistant isogeny Action with Low Exponents**](#), which are based on and detailed study of the Kuperberg's algorithm.
 
 ## Description of the C-code implementation
 
@@ -69,6 +69,8 @@ make csidh BITS=2048 STYLE=wd2
 make bench BITS=4096 STYLE=df
 ./csidh.4096-df.bench
 ```
+
+Additionally, the directory `/tmp` has all the optimal strategy used in the Group Action Evaluation of each CSIDH instantiation done in this project (our experimental benchmarking results can be found in the directory `/results`).
 
 ## Remarks
 
